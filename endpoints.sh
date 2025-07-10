@@ -33,6 +33,8 @@ analyze_routes() {
         echo "$content" | grep -oP '\.(?:get|post|put|delete|patch)\(\s*"\K[^"]+'
         echo "$content" | grep -oP '\.concat\(t,"\K[^"]+'
         echo "$content" | grep -oP '"\K/[^"]+(?="\s*:\s*(\{|$))'
+        echo "$content" | grep -oP '"components/\K[^"]+'
+        echo "$content" | grep -oP '["'\''](/api[^"'\'']*)["'\'']'
     )
 
 
