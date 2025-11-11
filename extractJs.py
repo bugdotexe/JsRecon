@@ -16,6 +16,7 @@ Options:
 import argparse
 import re
 import sys
+import html
 from pathlib import Path
 from urllib.parse import urljoin
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -51,10 +52,20 @@ def infer_domain_from_path(p: Path) -> str:
     return "localhost"
 
 def normalize_url(base: str, candidate: str) -> str:
-    """Normalize relative → absolute URL."""
-    c = candidate.strip()
+    """Normalize relative → absolute URL and clean encoded characters."""
+    c = html.unescape(candidate.strip())
     if not c or any(c.lower().startswith(s) for s in SKIP_SCHEMES):
         return ""
+
+    # Remove leading/trailing commas or HTML artifacts
+    c = c.strip(",;<> ")
+
+    # Unescape escaped slashes (\/ → /)
+    c = c.replace("\\/", "/")
+
+    # Remove stray fragments like '</' or '>;'
+    c = re.sub(r"[<>\s]*$", "", c)
+
     try:
         if c.startswith("//"):
             return "https:" + c
