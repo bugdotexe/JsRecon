@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-extract_js_fast.py
-
-Fast extractor for JavaScript URLs from many downloaded HTML/text files.
+extractJs.py — fast extractor for JavaScript URLs from any readable files.
 
 Usage:
-  ./extract_js_fast.py -f /path/to/file.txt -o js.urls
-  ./extract_js_fast.py -d /path/to/dir -o js.urls
+  ./extractJs.py -f /path/to/file.html -o js.urls
+  ./extractJs.py -d /path/to/dir -o js.urls
 
-Notes:
- - Directory search is recursive.
- - Domain is inferred from the path (first domain-like token found), default scheme is https.
- - Skips data:, javascript:, mailto:, tel:, and fragment-only strings.
+Options:
+  -f, --file   Single file to scan.
+  -d, --dir    Directory to scan recursively (all readable files).
+  -o, --output Output file (default: js_urls.txt)
+  -j, --jobs   Number of threads (default: 8)
 """
 
 import argparse
@@ -21,11 +20,10 @@ from pathlib import Path
 from urllib.parse import urljoin
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# --- Config
-MAX_WORKERS = 8  # adjust to number of CPU cores / I/O
-FILE_READ_CHUNK = 64 * 1024  # not used but can be used for streaming large files
+MAX_WORKERS = 8
+SKIP_SCHEMES = ("javascript:", "data:", "mailto:", "tel:", "#")
 
-# Precompile regex patterns (case-insensitive)
+# --- Regex patterns
 PATTERNS = [
     re.compile(r'<script[^>]*\bsrc\s*=\s*["\']([^"\']+)["\']', re.I),
     re.compile(r'\bimport\s*\(\s*["\']([^"\']+)["\']\s*\)', re.I),
@@ -37,120 +35,117 @@ PATTERNS = [
     re.compile(r'["\']([^"\']+\.js(?:\?[^"\']*)?)["\']', re.I),
 ]
 
-SKIP_SCHEMES = ("javascript:", "data:", "mailto:", "tel:", "#")
-
 DOMAIN_TOKEN_RE = re.compile(r'([a-z0-9\-]+\.)+[a-z]{2,}', re.I)
 
 # --- Helpers
 
 def infer_domain_from_path(p: Path) -> str:
-    """Best-effort domain inference from path string."""
-    s = str(p)
-    m = DOMAIN_TOKEN_RE.search(s)
+    """Guess domain from file path."""
+    m = DOMAIN_TOKEN_RE.search(str(p))
     if m:
         return m.group(0)
-    # fallback: basename before extension, underscores -> dots
-    base = p.stem
-    if "_" in base:
-        cand = base.replace("_", ".")
-        if DOMAIN_TOKEN_RE.search(cand):
-            return cand
-    # final fallback
+    base = p.stem.replace("_", ".")
+    m2 = DOMAIN_TOKEN_RE.search(base)
+    if m2:
+        return m2.group(0)
     return "localhost"
 
 def normalize_url(base: str, candidate: str) -> str:
-    """Return absolute canonical URL, or empty string if invalid/skip."""
-    cand = candidate.strip()
-    if not cand:
-        return ""
-    low = cand.lower()
-    if any(low.startswith(s) for s in SKIP_SCHEMES):
+    """Normalize relative → absolute URL."""
+    c = candidate.strip()
+    if not c or any(c.lower().startswith(s) for s in SKIP_SCHEMES):
         return ""
     try:
-        if cand.startswith("//"):
-            return "https:" + cand
-        # if candidate already has scheme, urljoin will keep it
-        return urljoin(base, cand)
+        if c.startswith("//"):
+            return "https:" + c
+        return urljoin(base, c)
     except Exception:
         return ""
 
-def extract_from_text(text: str):
-    """Yield raw matched URL candidates (not normalized)."""
+def extract_candidates(text: str):
+    """Extract possible JS URLs from text."""
     for rx in PATTERNS:
         for m in rx.findall(text):
-            # rx.findall returns str or tuple (for groups) depending on pattern
-            if isinstance(m, tuple):
-                # in case of multiple groups, pick last non-empty (not expected here)
-                for part in reversed(m):
-                    if part:
-                        yield part
-                        break
-            else:
-                yield m
+            yield m.strip()
+
+def read_text_safe(path: Path, max_size=5 * 1024 * 1024) -> str:
+    """Safely read file as text, skip large/binary files."""
+    try:
+        if path.stat().st_size > max_size:
+            return ""
+        with open(path, "rb") as f:
+            chunk = f.read(2048)
+            if b"\x00" in chunk:
+                return ""  # binary file
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            return f.read()
+    except Exception:
+        return ""
 
 def process_file(path: Path):
-    """
-    Read file content and extract normalized JS URLs.
-    Returns set of URLs found in this file.
-    """
-    try:
-        with path.open("r", encoding="utf-8", errors="ignore") as fh:
-            text = fh.read()
-    except Exception:
+    """Process one file, return set of JS URLs."""
+    text = read_text_safe(path)
+    if not text:
         return set()
-
     domain = infer_domain_from_path(path)
     base = f"https://{domain}/"
-
-    found = set()
-    for candidate in extract_from_text(text):
-        full = normalize_url(base, candidate)
+    results = set()
+    for cand in extract_candidates(text):
+        full = normalize_url(base, cand)
         if full:
-            found.add(full)
-    return found
+            results.add(full)
+    return results
 
-# --- Main CLI
+# --- Main
 
-def gather_files(single: Path=None, directory: Path=None):
+def gather_files(single: Path = None, directory: Path = None):
     files = []
-    if single:
-        if single.is_file():
-            files.append(single)
+    if single and single.is_file():
+        files.append(single)
     if directory:
-        files.extend([p for p in directory.rglob("*.txt") if p.is_file()])
+        for p in directory.rglob("*"):
+            if p.is_file() and os.access(p, os.R_OK):
+                files.append(p)
     return files
 
 def main(argv):
-    ap = argparse.ArgumentParser(prog=Path(argv[0]).name)
-    ap.add_argument("-f", "--file", type=Path, help="Single input file (.txt)")
-    ap.add_argument("-d", "--dir", type=Path, help="Directory to search recursively for .txt files")
-    ap.add_argument("-o", "--output", type=Path, default=Path("js_urls.txt"), help="Output file")
-    ap.add_argument("-j", "--jobs", type=int, default=MAX_WORKERS, help="Number of worker threads")
-    args = ap.parse_args(argv[1:])
+    parser = argparse.ArgumentParser(description="Extract JavaScript URLs from files.")
+    parser.add_argument("-f", "--file", type=Path, help="Single input file")
+    parser.add_argument("-d", "--dir", type=Path, help="Directory to scan recursively")
+    parser.add_argument("-o", "--output", type=Path, default=Path("js_urls.txt"), help="Output file")
+    parser.add_argument("-j", "--jobs", type=int, default=MAX_WORKERS, help="Number of threads (default: 8)")
+    args = parser.parse_args(argv[1:])
 
     if not args.file and not args.dir:
-        ap.error("Provide -f or -d")
+        parser.error("Provide -f or -d")
 
     files = gather_files(args.file, args.dir)
     if not files:
-        print("No files found to process.", file=sys.stderr)
+        print("No readable files found.")
         return 1
 
-    # Use thread pool - file IO is the main cost
+    print(f"[*] Scanning {len(files)} file(s)...")
+
     results = set()
     with ThreadPoolExecutor(max_workers=args.jobs) as ex:
-        futures = {ex.submit(process_file, p): p for p in files}
+        futures = {ex.submit(process_file, f): f for f in files}
         for fut in as_completed(futures):
-            p = futures[fut]
+            f = futures[fut]
             try:
                 res = fut.result()
                 if res:
                     results.update(res)
             except Exception as e:
-                # keep going on errors
-                print(f"[!] Error processing {p}: {e}", file=sys.stderr)
+                print(f"[!] Error processing {f}: {e}", file=sys.stderr)
 
-    # Write sorted unique results
-    outpath = args.output
-    outpath.parent.mkdir(parents=True, exist_ok=True)
-    with outpath.open("w", encoding="utf-8")
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    with args.output.open("w", encoding="utf-8") as fh:
+        for u in sorted(results):
+            fh.write(u + "\n")
+
+    print(f"[+] Found {len(results)} unique JS URLs → {args.output}")
+    return 0
+
+if __name__ == "__main__":
+    import os
+    sys.exit(main(sys.argv))
