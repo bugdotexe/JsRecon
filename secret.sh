@@ -1,25 +1,6 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-# ============================================================
-# Secret Detection 
-# ============================================================
-
-RED="\033[1;31m"
-GREEN="\033[1;32m"
-YELLOW="\033[1;33m"
-BLUE="\033[1;34m"
-CYAN="\033[1;36m"
-GRAY="\033[0;37m"
-BOLD="\033[1m"
-RESET="\033[0m"
-
-INFO="✅"
-SCAN="🔍"
-FOUND="🟡"
-ERROR="❌"
-SEP="------------------------------------------------------------"
-
 SECRETS_FILE="regex.json"
 TARGET=""
 IGNORE_CASE=0
@@ -34,9 +15,8 @@ Usage: $0 -t <target> [options]
   --follow        Follow symlinks
   -h              Show help
 
-Examples:
+Example:
   ./secret.sh -t ./src
-  ./secret.sh -t ./config.js -s myrules.json
   curl -s https://example.com/file.js | ./secret.sh
 EOF
 exit 0
@@ -49,7 +29,7 @@ while [[ $# -gt 0 ]]; do
         -i) IGNORE_CASE=1; shift;;
         --follow) FOLLOW_SYMLINKS=1; shift;;
         -h|--help) usage;;
-        *) echo -e "${RED}${ERROR} Unknown argument:${RESET} $1"; usage;;
+        *) echo "Unknown arg: $1"; usage;;
     esac
 done
 
@@ -60,9 +40,10 @@ if [ -z "$TARGET" ] && [ ! -t 0 ]; then
     TARGET="$TMP_STDIN"
 fi
 
-if [ -z "$TARGET" ]; then echo -e "${RED}${ERROR} No target given.${RESET}"; usage; fi
-if [ ! -f "$SECRETS_FILE" ]; then echo -e "${RED}${ERROR} Regex file not found:${RESET} $SECRETS_FILE"; exit 1; fi
-if [ ! -e "$TARGET" ]; then echo -e "${RED}${ERROR} Target not found:${RESET} $TARGET"; exit 1; fi
+if [ -z "$TARGET" ]; then echo "❌ No target given."; usage; fi
+if [ ! -f "$SECRETS_FILE" ]; then echo "❌ Regex file not found: $SECRETS_FILE"; exit 1; fi
+if [ ! -e "$TARGET" ]; then echo "❌ Target not found: $TARGET"; exit 1; fi
+
 
 if command -v rg &>/dev/null; then
     SEARCH_TOOL="rg"
@@ -88,32 +69,29 @@ done
 cleanup() { rm -f "$TMP_STDIN" 2>/dev/null || true; }
 trap cleanup EXIT
 
-echo -e "${BLUE}🔎 Using${RESET} $SEARCH_TOOL"
-echo -e "${BLUE}📘 Regex source:${RESET} ${SECRETS_FILE}"
-echo -e "${BLUE}📂 Target:${RESET} ${TARGET}"
-echo -e "${GRAY}${SEP}${RESET}"
+echo "🔎 Using $SEARCH_TOOL"
+echo "📘 Regex source: $SECRETS_FILE"
+echo "📂 Target: $TARGET"
+echo "------------------------------------------------------------"
 
 jq -r 'to_entries[] | "\(.key)|\(.value)"' "$SECRETS_FILE" | \
 while IFS='|' read -r rule regex; do
     [ -z "$regex" ] && continue
-    echo -e "${BLUE}${SCAN} Scanning for:${RESET} ${rule}"
+    echo "🔍 Scanning for: $rule"
 
     if [ "$SEARCH_TOOL" = "rg" ]; then
         rg "${RG_OPTS[@]}" "${EXCLUDE_ARGS[@]}" -e "$regex" "$TARGET" 2>/dev/null | \
         while IFS=: read -r file line match; do
             [ -z "$file" ] && continue
-            echo -e "${YELLOW}${FOUND} [${rule}]${RESET} ${file}:${line}"
-            echo -e "    ${CYAN}🔑 ${match}${RESET}"
+            echo "🟡 [$rule] $file:$line"
+            echo "    🔑 $match"
         done
     else
         grep -R "${GREP_OPTS[@]}" "${EXCLUDE_ARGS[@]}" -e "$regex" "$TARGET" 2>/dev/null | \
         while IFS=: read -r file line match; do
             [ -z "$file" ] && continue
-            echo -e "${YELLOW}${FOUND} [${rule}]${RESET} ${file}:${line}"
-            echo -e "    ${CYAN}🔑 ${match}${RESET}"
+            echo "🟡 [$rule] $file:$line"
+            echo "    🔑 $match"
         done
     fi
 done
-
-echo -e "${GRAY}${SEP}${RESET}"
-echo -e "${GREEN}${INFO} Scan complete.${RESET}"
